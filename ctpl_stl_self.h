@@ -85,14 +85,21 @@ namespace ctpl {
                     this->threads.resize(nThreads);
                     for (auto i = oldThreads; i < nThreads; ++i) {
                         this->flags[i] = std::make_shared<std::atomic<bool>>(false);
+                        this->set_thread(i);
                     }
+                    
                 }
                 else {
-
                     for (auto i = nThreads - 1; i < oldThreads; ++i) {
                         this->threads[i]->detach();
+                        *this->flags[i] = true;
+                    } 
+                    {
+                        std::unique_lock<std::mutex> lock(mutex);
+                        cv.notify_all();
                     }
                     this->threads.resize(nThreads);
+                    this->flags.resize(nThreads);
                 }
             }
         }
@@ -107,21 +114,33 @@ namespace ctpl {
         thread_pool& operator=(thread_pool&&);// = delete;
 
         void set_thread(int i) {
-            auto f = [this, i]() {
+            std::shared_ptr<std::atomic<bool>> flag(this->flags[i]);
+            auto f = [this, i, flag]() {
+                std::atomic<bool>& _flag = *flag;
                 std::function<void(int)>* _f;
                 bool isPop = this->q.pop(_f);
                 while (true)
                 {
                     while (isPop) { 
+
                         std::unique_ptr<std::function<void(int)>> f(_f);
                         (*_f)(i);
-                        isPop = this->q.pop(_f);;
+
+                        if (*flag) {
+                            return;
+                        }
+
+                        isPop = this->q.pop(_f);
                     }
 
                     std::unique_lock<std::mutex> lock(this->mutex);
                     ++nWaiting;
-                    cv.wait(lock, [this,&_f, &isPop] { isPop = this->q.pop(_f); return isPop; });
+                    cv.wait(lock, [this,&_f, &isPop, &_flag] { isPop = this->q.pop(_f); return isPop || _flag; });
                     --nWaiting;
+
+                    if (*flag) {
+                        return;
+                    }
                 }
             };
 
@@ -139,6 +158,7 @@ namespace ctpl {
         std::atomic<bool> isDone;
         std::atomic<bool> isStop;
         std::atomic<int> nWaiting;  // how many threads are waiting
+
 
         std::mutex mutex;
         std::condition_variable cv;
